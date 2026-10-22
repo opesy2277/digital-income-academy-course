@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -9,8 +10,6 @@ import {
   RefreshCw,
   Search,
   Users,
-  CheckCircle2,
-  Clock,
   ShieldAlert,
 } from "lucide-react";
 
@@ -18,14 +17,6 @@ type Student = {
   id: string;
   full_name: string | null;
   role: string;
-  created_at?: string;
-  email?: string | null;
-  enrollment?: {
-    payment_status: string;
-    access_granted: boolean;
-    payment_provider: string | null;
-    payment_reference: string | null;
-  } | null;
 };
 
 export default function StudentsPage() {
@@ -50,7 +41,6 @@ export default function StudentsPage() {
 
       if (authError || !user) {
         setError("Please sign in with an administrator account.");
-        setLoading(false);
         return;
       }
 
@@ -63,45 +53,22 @@ export default function StudentsPage() {
       if (profileError || profile?.role !== "admin") {
         setIsAdmin(false);
         setError("You do not have permission to view student records.");
-        setLoading(false);
         return;
       }
 
       setIsAdmin(true);
 
-      const { data: profiles, error: profilesError } = await supabase
+      const { data, error: studentsError } = await supabase
         .from("profiles")
         .select("id, full_name, role")
         .eq("role", "student")
         .order("full_name", { ascending: true });
 
-      if (profilesError) {
-        throw new Error(profilesError.message);
+      if (studentsError) {
+        throw new Error(studentsError.message);
       }
 
-      const { data: enrollments, error: enrollmentError } = await supabase
-        .from("enrollments")
-        .select(
-          "user_id, payment_status, access_granted, payment_provider, payment_reference"
-        );
-
-      if (enrollmentError) {
-        throw new Error(enrollmentError.message);
-      }
-
-      const enrollmentMap = new Map(
-        (enrollments ?? []).map((enrollment) => [
-          enrollment.user_id,
-          enrollment,
-        ])
-      );
-
-      const results: Student[] = (profiles ?? []).map((profile) => ({
-        ...profile,
-        enrollment: enrollmentMap.get(profile.id) ?? null,
-      }));
-
-      setStudents(results);
+      setStudents(data ?? []);
     } catch (err) {
       setError(
         err instanceof Error
@@ -118,27 +85,14 @@ export default function StudentsPage() {
   }, [loadStudents, refreshKey]);
 
   const filteredStudents = students.filter((student) => {
-    const query = search.toLowerCase().trim();
+    const query = search.trim().toLowerCase();
 
     return (
       !query ||
       student.full_name?.toLowerCase().includes(query) ||
-      student.id.toLowerCase().includes(query) ||
-      student.enrollment?.payment_reference?.toLowerCase().includes(query)
+      student.id.toLowerCase().includes(query)
     );
   });
-
-  const verifiedCount = students.filter(
-    (student) => student.enrollment?.payment_status === "verified"
-  ).length;
-
-  const pendingCount = students.filter(
-    (student) => student.enrollment?.payment_status === "pending"
-  ).length;
-
-  const accessCount = students.filter(
-    (student) => student.enrollment?.access_granted
-  ).length;
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-8 text-slate-900 sm:px-6 lg:px-10">
@@ -162,7 +116,7 @@ export default function StudentsPage() {
               </h1>
             </div>
             <p className="text-sm text-slate-600">
-              View registered students, payment records, and course access.
+              View and search registered student profiles.
             </p>
           </div>
 
@@ -171,7 +125,10 @@ export default function StudentsPage() {
             disabled={loading}
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-3 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-60"
           >
-            <RefreshCw size={17} className={loading ? "animate-spin" : ""} />
+            <RefreshCw
+              size={17}
+              className={loading ? "animate-spin" : ""}
+            />
             Refresh
           </button>
         </section>
@@ -183,27 +140,18 @@ export default function StudentsPage() {
           </div>
         )}
 
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard
-            title="Total Students"
-            value={students.length}
-            icon={<Users size={22} />}
-          />
-          <StatCard
-            title="Verified Payments"
-            value={verifiedCount}
-            icon={<CheckCircle2 size={22} />}
-          />
-          <StatCard
-            title="Pending Payments"
-            value={pendingCount}
-            icon={<Clock size={22} />}
-          />
-          <StatCard
-            title="Course Access Granted"
-            value={accessCount}
-            icon={<GraduationCap size={22} />}
-          />
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-slate-500">
+                Registered Students
+              </p>
+              <p className="mt-2 text-3xl font-bold">{students.length}</p>
+            </div>
+            <span className="rounded-xl bg-blue-50 p-3 text-blue-700">
+              <Users size={25} />
+            </span>
+          </div>
         </section>
 
         <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
@@ -224,7 +172,7 @@ export default function StudentsPage() {
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search name, ID, or payment reference"
+                placeholder="Search student name or ID"
                 className="w-full rounded-lg border border-slate-300 py-3 pl-10 pr-4 text-sm outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
               />
             </div>
@@ -232,7 +180,7 @@ export default function StudentsPage() {
 
           {loading ? (
             <div className="p-12 text-center text-slate-500">
-              Loading student records...
+              Loading student profiles...
             </div>
           ) : !isAdmin && !error ? (
             <div className="p-12 text-center text-slate-500">
@@ -245,18 +193,16 @@ export default function StudentsPage() {
                 No students found
               </p>
               <p className="mt-1 text-sm text-slate-500">
-                Students will appear here after their profiles are created.
+                Registered student profiles will appear here.
               </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[850px] text-left text-sm">
+              <table className="w-full min-w-[500px] text-left text-sm">
                 <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                   <tr>
                     <th className="px-5 py-4">Student</th>
-                    <th className="px-5 py-4">Payment</th>
-                    <th className="px-5 py-4">Course Access</th>
-                    <th className="px-5 py-4">Payment Reference</th>
+                    <th className="px-5 py-4">Account Role</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -266,31 +212,13 @@ export default function StudentsPage() {
                         <p className="font-semibold text-slate-900">
                           {student.full_name || "Unnamed student"}
                         </p>
-                        <p className="mt-1 text-xs text-slate-500">
+                        <p className="mt-1 break-all text-xs text-slate-500">
                           ID: {student.id}
                         </p>
                       </td>
                       <td className="px-5 py-4">
-                        {student.enrollment ? (
-                          <StatusBadge
-                            value={student.enrollment.payment_status}
-                          />
-                        ) : (
-                          <StatusBadge value="not enrolled" />
-                        )}
-                      </td>
-                      <td className="px-5 py-4">
-                        <StatusBadge
-                          value={
-                            student.enrollment?.access_granted
-                              ? "granted"
-                              : "not granted"
-                          }
-                        />
-                      </td>
-                      <td className="px-5 py-4">
-                        <span className="break-all text-xs text-slate-600">
-                          {student.enrollment?.payment_reference || "—"}
+                        <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-semibold capitalize text-blue-800">
+                          Student
                         </span>
                       </td>
                     </tr>
@@ -300,62 +228,7 @@ export default function StudentsPage() {
             </div>
           )}
         </section>
-
-        <p className="text-xs leading-5 text-slate-500">
-          Student information is read from your Supabase profiles and
-          enrollments tables. Payment verification and course-access changes
-          should be handled through your authorized enrollment workflow.
-        </p>
       </div>
     </main>
-  );
-}
-
-function StatCard({
-  title,
-  value,
-  icon,
-}: {
-  title: string;
-  value: number;
-  icon: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-medium text-slate-500">{title}</p>
-        <span className="rounded-lg bg-blue-50 p-2 text-blue-700">{icon}</span>
-      </div>
-      <p className="mt-4 text-3xl font-bold">{value}</p>
-    </div>
-  );
-}
-
-function StatusBadge({ value }: { value: string }) {
-  const normalized = value.toLowerCase();
-
-  let styles = "bg-slate-100 text-slate-700";
-
-  if (
-    normalized === "verified" ||
-    normalized === "granted"
-  ) {
-    styles = "bg-green-100 text-green-800";
-  } else if (normalized === "pending") {
-    styles = "bg-amber-100 text-amber-800";
-  } else if (
-    normalized === "failed" ||
-    normalized === "refunded" ||
-    normalized === "not granted"
-  ) {
-    styles = "bg-red-100 text-red-800";
-  }
-
-  return (
-    <span
-      className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold capitalize ${styles}`}
-    >
-      {value.replaceAll("_", " ")}
-    </span>
   );
 }
