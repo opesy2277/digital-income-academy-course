@@ -4,26 +4,36 @@ import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 type Role = "student" | "admin";
 
-type AuthorizedAdmin =
+type AdminAuth =
   | { user: { id: string } }
   | { error: string; status: 401 | 403 };
 
-function errorResponse(
-  error: string,
-  status: number,
-  errorId?: string
+function respond(
+  body: Record<string, unknown>,
+  status = 200
 ) {
-  return NextResponse.json(
-    { error, ...(errorId ? { errorId } : {}) },
-    { status, headers: { "Cache-Control": "no-store" } }
-  );
+  return NextResponse.json(body, {
+    status,
+    headers: { "Cache-Control": "no-store" },
+  });
 }
 
-async function getAuthorizedAdmin(): Promise<AuthorizedAdmin> {
-  const supabase = await createClient();
+async function getAuthorizedAdmin(): Promise<AdminAuth> {
+  let supabase;
+
+  try {
+    supabase = await createClient();
+  } catch (error) {
+    console.error("Admin authorization client failed:", error);
+    return {
+      error: "Could not initialize authentication. Check server configuration.",
+      status: 403,
+    };
+  }
 
   const {
     data: { user },
@@ -41,7 +51,7 @@ async function getAuthorizedAdmin(): Promise<AuthorizedAdmin> {
     .maybeSingle();
 
   if (error) {
-    console.error("Admin authorization profile lookup failed:", error.message);
+    console.error("Admin profile authorization failed:", error.message);
     return {
       error: "Could not verify administrator permissions.",
       status: 403,
@@ -64,8 +74,10 @@ function getServiceClient() {
 
   if (!url || !serviceKey) {
     throw new Error(
-      `Missing server configuration: ${
-        !url ? "NEXT_PUBLIC_SUPABASE_URL" : "SUPABASE_SERVICE_ROLE_KEY"
+      `Missing environment variable: ${
+        !url
+          ? "NEXT_PUBLIC_SUPABASE_URL"
+          : "SUPABASE_SERVICE_ROLE_KEY"
       }`
     );
   }
@@ -86,24 +98,30 @@ export async function GET() {
     const auth = await getAuthorizedAdmin();
 
     if ("error" in auth) {
-      return errorResponse(auth.error, auth.status);
+      return respond({ error: auth.error }, auth.status);
     }
 
-    stage = "service_client";
+    stage = "service_client_initialization";
     const service = getServiceClient();
 
-    stage = "profile_query";
+    stage = "profiles_query";
     const { data: profiles, error: profileError } = await service
       .from("profiles")
       .select("id, full_name, role")
       .order("full_name", { ascending: true });
 
     if (profileError) {
-      console.error(`[Admin API ${errorId}] Profile query failed:`, profileError.message);
-      return errorResponse("Could not load student profiles.", 500, errorId);
+      console.error(`[${errorId}] ${stage}:`, profileError.message);
+      return respond(
+        {
+          error: "Could not load student profiles.",
+          errorId,
+        },
+        500
+      );
     }
 
-    stage = "auth_user_query";
+    stage = "auth_users_query";
     const { data: authData, error: usersError } =
       await service.auth.admin.listUsers({
         page: 1,
@@ -111,11 +129,13 @@ export async function GET() {
       });
 
     if (usersError) {
-      console.error(`[Admin API ${errorId}] Auth user query failed:`, usersError.message);
-      return errorResponse(
-        "Could not load account email addresses.",
-        500,
-        errorId
+      console.error(`[${errorId}] ${stage}:`, usersError.message);
+      return respond(
+        {
+          error: "Could not load account email addresses.",
+          errorId,
+        },
+        500
       );
     }
 
@@ -136,17 +156,17 @@ export async function GET() {
       };
     });
 
-    return NextResponse.json(
-      { users },
-      { headers: { "Cache-Control": "no-store" } }
-    );
+    return respond({ users });
   } catch (error) {
-    console.error(`[Admin API ${errorId}] Failed at ${stage}:`, error);
+    console.error(`[Admin GET ${errorId}] Failed at ${stage}:`, error);
 
-    return errorResponse(
-      "An unexpected server error occurred.",
-      500,
-      errorId
+    return respond(
+      {
+        error: "An unexpected server error occurred.",
+        errorId,
+        stage,
+      },
+      500
     );
   }
 }
@@ -159,7 +179,7 @@ export async function PATCH(request: NextRequest) {
     const auth = await getAuthorizedAdmin();
 
     if ("error" in auth) {
-      return errorResponse(auth.error, auth.status);
+      return respond({ error: auth.error }, auth.status);
     }
 
     let body: { userId?: string; role?: Role };
@@ -167,7 +187,7 @@ export async function PATCH(request: NextRequest) {
     try {
       body = await request.json();
     } catch {
-      return errorResponse("Invalid request body.", 400);
+      return respond({ error: "Invalid request body." }, 400);
     }
 
     const { userId, role } = body;
@@ -177,17 +197,23 @@ export async function PATCH(request: NextRequest) {
       !userId.trim() ||
       (role !== "student" && role !== "admin")
     ) {
-      return errorResponse("Choose a valid user and role.", 400);
-    }
-
-    if (userId === auth.user.id && role !== "admin") {
-      return errorResponse(
-        "You cannot remove your own administrator role here.",
+      return respond(
+        { error: "Choose a valid user and role." },
         400
       );
     }
 
-    stage = "service_client";
+    if (userId === auth.user.id && role !== "admin") {
+      return respond(
+        {
+          error:
+            "You cannot remove your own administrator role here.",
+        },
+        400
+      );
+    }
+
+    stage = "service_client_initialization";
     const service = getServiceClient();
 
     stage = "target_profile_query";
@@ -198,26 +224,26 @@ export async function PATCH(request: NextRequest) {
       .maybeSingle();
 
     if (targetError) {
-      console.error(`[Admin API ${errorId}] Target lookup failed:`, targetError.message);
-      return errorResponse(
-        "Could not verify the selected account.",
-        500,
-        errorId
+      console.error(`[${errorId}] ${stage}:`, targetError.message);
+      return respond(
+        { error: "Could not verify the selected account.", errorId },
+        500
       );
     }
 
     if (!target) {
-      return errorResponse("This user profile could not be found.", 404);
+      return respond(
+        { error: "This user profile could not be found." },
+        404
+      );
     }
 
     if (target.role === role) {
-      return NextResponse.json({
-        message: "The user already has this role.",
-      });
+      return respond({ message: "The user already has this role." });
     }
 
     if (target.role === "admin" && role === "student") {
-      stage = "admin_count_query";
+      stage = "administrator_count_query";
 
       const { count, error: countError } = await service
         .from("profiles")
@@ -225,59 +251,65 @@ export async function PATCH(request: NextRequest) {
         .eq("role", "admin");
 
       if (countError) {
-        console.error(`[Admin API ${errorId}] Admin count failed:`, countError.message);
-        return errorResponse(
-          "Could not verify administrator accounts.",
-          500,
-          errorId
+        console.error(`[${errorId}] ${stage}:`, countError.message);
+        return respond(
+          {
+            error: "Could not verify administrator accounts.",
+            errorId,
+          },
+          500
         );
       }
 
       if ((count ?? 0) <= 1) {
-        return errorResponse(
-          "You cannot remove the last administrator.",
+        return respond(
+          { error: "You cannot remove the last administrator." },
           400
         );
       }
     }
 
     stage = "role_update";
-    const { data: updatedProfiles, error: updateError } = await service
+    const { data: updated, error: updateError } = await service
       .from("profiles")
       .update({ role })
       .eq("id", userId)
       .select("id");
 
     if (updateError) {
-      console.error(`[Admin API ${errorId}] Role update failed:`, updateError.message);
-      return errorResponse(
-        "Could not update this user's role.",
-        500,
-        errorId
+      console.error(`[${errorId}] ${stage}:`, updateError.message);
+      return respond(
+        { error: "Could not update this user's role.", errorId },
+        500
       );
     }
 
-    if (!updatedProfiles || updatedProfiles.length === 0) {
-      return errorResponse(
-        "The role was not changed. Check database permissions.",
-        500,
-        errorId
+    if (!updated || updated.length === 0) {
+      return respond(
+        {
+          error: "No profile was updated. Verify the selected account.",
+          errorId,
+        },
+        500
       );
     }
 
-    return NextResponse.json({
+    return respond({
       message:
         role === "admin"
           ? "User successfully promoted to administrator."
           : "Administrator role changed to student.",
     });
   } catch (error) {
-    console.error(`[Admin API ${errorId}] Failed at ${stage}:`, error);
+    console.error(`[Admin PATCH ${errorId}] Failed at ${stage}:`, error);
 
-    return errorResponse(
-      "An unexpected server error occurred.",
-      500,
-      errorId
+    return respond(
+      {
+        error: "An unexpected server error occurred.",
+        errorId,
+        stage,
+      },
+      500
     );
   }
 }
