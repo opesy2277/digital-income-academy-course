@@ -3,8 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 
-export const dynamic = "force-dynamic";
-export const runtime = "nodejs";
+
 
 type Role = "student" | "admin";
 
