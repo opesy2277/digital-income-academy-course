@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   LockKeyhole,
   Mail,
+  MailCheck,
   UserRound,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
@@ -28,13 +29,19 @@ export default function LoginPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [verificationEmail, setVerificationEmail] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
+  const [resendLoading, setResendLoading] = useState(false);
   const [checkingSession, setCheckingSession] = useState(true);
 
   const isBusy =
-    loading || googleLoading || resetLoading || checkingSession;
+    loading ||
+    googleLoading ||
+    resetLoading ||
+    resendLoading ||
+    checkingSession;
 
   function getRedirectBase() {
     return process.env.NODE_ENV === "production"
@@ -76,11 +83,11 @@ export default function LoginPage() {
 
     async function checkSession() {
       try {
-        // A first-time visitor sees registration.
-        // A returning visitor sees login unless already authenticated.
         try {
-          const hasVisited = window.localStorage.getItem(DEVICE_VISIT_KEY);
-          if (active && hasVisited === "yes") {
+          if (
+            active &&
+            window.localStorage.getItem(DEVICE_VISIT_KEY) === "yes"
+          ) {
             setMode("login");
           }
         } catch {
@@ -110,7 +117,6 @@ export default function LoginPage() {
     return () => {
       active = false;
     };
-    // Run once when the page opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -127,6 +133,7 @@ export default function LoginPage() {
     setMode(nextMode);
     setError("");
     setMessage("");
+    setVerificationEmail("");
     setPassword("");
     setConfirmPassword("");
   }
@@ -165,32 +172,28 @@ export default function LoginPage() {
       if (mode === "register") {
         const redirectBase = getRedirectBase();
 
-        const { data, error: signUpError } =
-          await supabase.auth.signUp({
-            email: cleanEmail,
-            password,
-            options: {
-              data: {
-                full_name: cleanName,
-              },
-              emailRedirectTo:
-                `${redirectBase}/auth/callback?next=/student`,
-            },
-          });
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: cleanEmail,
+          password,
+          options: {
+            data: { full_name: cleanName },
+            emailRedirectTo: `${redirectBase}/auth/callback?next=/student`,
+          },
+        });
 
         if (signUpError) {
           const lowerMessage = signUpError.message.toLowerCase();
 
           if (lowerMessage.includes("rate limit")) {
             setError(
-              "Confirmation emails are temporarily rate-limited. Please wait before trying again."
+              "Too many verification email requests. Please wait a while before trying again."
             );
           } else if (
             lowerMessage.includes("already registered") ||
             lowerMessage.includes("already exists")
           ) {
             setError(
-              "An account may already exist with this email. Switch to Login and try signing in."
+              "An account may already exist with this email. Try logging in or requesting a password reset."
             );
           } else {
             setError(signUpError.message);
@@ -203,8 +206,10 @@ export default function LoginPage() {
           return;
         }
 
+        setVerificationEmail(cleanEmail);
+        setEmail(cleanEmail);
         setMessage(
-          "Your registration was received. Check your email to confirm your account if confirmation is required, then sign in."
+          "Your registration was received. Check your email inbox for a verification link. Open the message and click the link to verify your email before signing in. If it is missing, check your spam or junk folder."
         );
         setMode("login");
         setPassword("");
@@ -219,9 +224,18 @@ export default function LoginPage() {
         });
 
       if (loginError || !data.user) {
-        setError(
-          "Login failed. Check your email and password. If email confirmation is required, confirm your email first."
-        );
+        const details = loginError?.message.toLowerCase() ?? "";
+
+        if (details.includes("email not confirmed")) {
+          setVerificationEmail(cleanEmail);
+          setError(
+            "Your email has not been verified yet. Check your inbox for the verification link, or request another one below."
+          );
+        } else {
+          setError(
+            "Login failed. Check your email and password. If you registered recently, confirm your email first."
+          );
+        }
         return;
       }
 
@@ -234,6 +248,57 @@ export default function LoginPage() {
     }
   }
 
+  async function handleResendVerification() {
+    const cleanEmail = (verificationEmail || email).trim().toLowerCase();
+
+    setError("");
+    setMessage("");
+
+    if (!cleanEmail) {
+      setError("Enter your email address first.");
+      return;
+    }
+
+    setResendLoading(true);
+
+    try {
+      const supabase = createClient();
+
+      const { error: resendError } = await supabase.auth.resend({
+        type: "signup",
+        email: cleanEmail,
+        options: {
+          emailRedirectTo: `${getRedirectBase()}/auth/callback?next=/student`,
+        },
+      });
+
+      if (resendError) {
+        const lowerMessage = resendError.message.toLowerCase();
+
+        if (lowerMessage.includes("rate limit")) {
+          setError(
+            "Please wait before requesting another verification email."
+          );
+        } else {
+          setError(
+            "We could not resend the email right now. Check the address and try again later."
+          );
+        }
+        return;
+      }
+
+      setVerificationEmail(cleanEmail);
+      setMessage(
+        "If this address has a pending registration, a new verification email has been requested. Check your inbox and spam or junk folder."
+      );
+    } catch (err) {
+      console.error("Resend verification failed:", err);
+      setError("Could not resend the verification email. Please try again.");
+    } finally {
+      setResendLoading(false);
+    }
+  }
+
   async function handleGoogleLogin() {
     setError("");
     setMessage("");
@@ -242,26 +307,22 @@ export default function LoginPage() {
 
     try {
       const supabase = createClient();
-      const redirectBase = getRedirectBase();
 
-      const { error: googleError } =
-        await supabase.auth.signInWithOAuth({
-          provider: "google",
-          options: {
-            redirectTo:
-              `${redirectBase}/auth/callback?next=/student`,
-            queryParams: {
-              access_type: "offline",
-              prompt: "select_account",
-            },
+      const { error: googleError } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${getRedirectBase()}/auth/callback?next=/student`,
+          queryParams: {
+            access_type: "offline",
+            prompt: "select_account",
           },
-        });
+        },
+      });
 
       if (googleError) {
         setError(googleError.message);
         setGoogleLoading(false);
       }
-      // On successful OAuth initiation, the browser navigates to Google.
     } catch (err) {
       console.error("Google sign-in error:", err);
       setError("Could not start Google sign-in. Please try again.");
@@ -284,10 +345,10 @@ export default function LoginPage() {
 
     try {
       const supabase = createClient();
+
       const { error: resetError } =
         await supabase.auth.resetPasswordForEmail(cleanEmail, {
-          redirectTo:
-            `${getRedirectBase()}/auth/callback?next=/auth/update-password`,
+          redirectTo: `${getRedirectBase()}/auth/callback?next=/auth/update-password`,
         });
 
       if (resetError) {
@@ -296,7 +357,7 @@ export default function LoginPage() {
       }
 
       setMessage(
-        "If an account exists for that email, you will receive instructions to set or reset your password."
+        "If an account exists for that email, you will receive instructions to set or reset your password. Check your inbox and spam folder."
       );
     } catch (err) {
       console.error("Password reset request failed:", err);
@@ -389,7 +450,6 @@ export default function LoginPage() {
             </button>
           </div>
 
-          {/* Google is available during both registration and login. */}
           <button
             type="button"
             onClick={() => void handleGoogleLogin()}
@@ -525,9 +585,28 @@ export default function LoginPage() {
             )}
 
             {message && (
-              <p role="status" className="rounded-xl border border-blue-100 bg-blue-50 p-3 text-sm leading-6 text-blue-800">
-                {message}
-              </p>
+              <div role="status" className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm leading-6 text-blue-900">
+                <div className="flex items-start gap-2">
+                  <MailCheck size={20} className="mt-0.5 shrink-0 text-blue-700" />
+                  <p>{message}</p>
+                </div>
+              </div>
+            )}
+
+            {verificationEmail && (
+              <button
+                type="button"
+                onClick={() => void handleResendVerification()}
+                disabled={isBusy}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-blue-200 px-4 py-3 font-semibold text-blue-900 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {resendLoading ? (
+                  <LoaderCircle size={18} className="animate-spin" />
+                ) : (
+                  <MailCheck size={18} />
+                )}
+                {resendLoading ? "Requesting email..." : "Resend verification email"}
+              </button>
             )}
 
             <button
