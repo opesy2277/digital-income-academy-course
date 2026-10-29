@@ -69,21 +69,22 @@ export default function AdminLessonsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [publishingId, setPublishingId] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
+  const checkAdmin = useCallback(async () => {
     const {
       data: { user },
       error: authError,
     } = await supabase.auth.getUser();
 
-    if (authError || !user) {
-      window.location.href = "/";
-      return;
+    if (authError) {
+      throw new Error(`Could not verify your session: ${authError.message}`);
+    }
+
+    if (!user) {
+      throw new Error("Your session has expired. Please sign in again.");
     }
 
     const { data: profile, error: profileError } = await supabase
@@ -93,37 +94,56 @@ export default function AdminLessonsPage() {
       .single();
 
     if (profileError || profile?.role !== "admin") {
-      window.location.href = "/";
-      return;
+      throw new Error(
+        "This account is not recognized as an administrator."
+      );
     }
 
-    const [moduleResult, lessonResult] = await Promise.all([
-      supabase
-        .from("modules")
-        .select("id, module_number, title, published")
-        .order("module_number", { ascending: true }),
-      supabase
-        .from("lessons")
-        .select(
-          "id, module_id, title, content, media_url, lesson_number, published"
-        )
-        .order("lesson_number", { ascending: true }),
-    ]);
-
-    if (moduleResult.error) {
-      setError(`Could not load modules: ${moduleResult.error.message}`);
-    } else {
-      setModules(moduleResult.data ?? []);
-    }
-
-    if (lessonResult.error) {
-      setError(`Could not load lessons: ${lessonResult.error.message}`);
-    } else {
-      setLessons(lessonResult.data ?? []);
-    }
-
-    setLoading(false);
+    return user;
   }, [supabase]);
+
+  const loadData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    try {
+      await checkAdmin();
+
+      const [moduleResult, lessonResult] = await Promise.all([
+        supabase
+          .from("modules")
+          .select("id, module_number, title, published")
+          .order("module_number", { ascending: true }),
+        supabase
+          .from("lessons")
+          .select(
+            "id, module_id, title, content, media_url, lesson_number, published"
+          )
+          .order("lesson_number", { ascending: true }),
+      ]);
+
+      if (moduleResult.error) {
+        throw new Error(
+          `Could not load modules: ${moduleResult.error.message}`
+        );
+      }
+
+      if (lessonResult.error) {
+        throw new Error(
+          `Could not load lessons: ${lessonResult.error.message}`
+        );
+      }
+
+      setModules(moduleResult.data ?? []);
+      setLessons(lessonResult.data ?? []);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not load lesson management."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [checkAdmin, supabase]);
 
   useEffect(() => {
     void loadData();
@@ -163,6 +183,8 @@ export default function AdminLessonsPage() {
     setEditingId(null);
     setSelectedVideo(null);
     setForm(emptyForm);
+    setMessage("");
+    setError("");
   }
 
   function handleVideoChange(file: File | null) {
@@ -209,26 +231,7 @@ export default function AdminLessonsPage() {
         throw new Error("Please enter a lesson title.");
       }
 
-      const {
-        data: { user },
-        error: authError,
-      } = await supabase.auth.getUser();
-
-      if (authError || !user) {
-        throw new Error("Your session has expired. Please sign in again.");
-      }
-
-      // Check the admin role again before starting the upload.
-      const { data: profile, error: profileError } = await supabase
-        .from("profiles")
-        .select("role")
-        .eq("id", user.id)
-        .single();
-
-      if (profileError || profile?.role !== "admin") {
-        throw new Error("Only an administrator can save lessons.");
-      }
-
+      const user = await checkAdmin();
       let mediaPath = form.media_url.trim() || null;
 
       if (selectedVideo) {
@@ -259,7 +262,6 @@ export default function AdminLessonsPage() {
           throw new Error(`Video upload failed: ${uploadError.message}`);
         }
 
-        // Save the private storage path, not a public URL.
         mediaPath = storagePath;
       }
 
@@ -277,11 +279,23 @@ export default function AdminLessonsPage() {
             .from("lessons")
             .update(lessonData)
             .eq("id", editingId)
-        : await supabase.from("lessons").insert(lessonData);
+            .select("id")
+            .maybeSingle()
+        : await supabase
+            .from("lessons")
+            .insert(lessonData)
+            .select("id")
+            .single();
 
       if (result.error) {
         throw new Error(
           `The lesson could not be saved: ${result.error.message}`
+        );
+      }
+
+      if (!result.data) {
+        throw new Error(
+          "No lesson was saved. Check your lesson permissions and try again."
         );
       }
 
@@ -306,24 +320,50 @@ export default function AdminLessonsPage() {
   }
 
   async function togglePublished(lesson: LessonItem) {
+    if (publishingId) return;
+
     setError("");
     setMessage("");
+    setPublishingId(lesson.id);
 
-    const { error: updateError } = await supabase
-      .from("lessons")
-      .update({ published: !lesson.published })
-      .eq("id", lesson.id);
+    try {
+      await checkAdmin();
 
-    if (updateError) {
-      setError(`Could not update lesson: ${updateError.message}`);
-      return;
+      const { data, error: updateError } = await supabase
+        .from("lessons")
+        .update({ published: !lesson.published })
+        .eq("id", lesson.id)
+        .select("id, published")
+        .maybeSingle();
+
+      if (updateError) {
+        throw new Error(`Could not update lesson: ${updateError.message}`);
+      }
+
+      if (!data) {
+        throw new Error(
+          "No lesson was updated. Supabase did not return an updated row. Check the lesson UPDATE policy."
+        );
+      }
+
+      setLessons((current) =>
+        current.map((item) =>
+          item.id === data.id
+            ? { ...item, published: data.published }
+            : item
+        )
+      );
+
+      setMessage(
+        data.published ? "Lesson published." : "Lesson unpublished."
+      );
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Could not update lesson."
+      );
+    } finally {
+      setPublishingId(null);
     }
-
-    setMessage(
-      lesson.published ? "Lesson unpublished." : "Lesson published."
-    );
-
-    await loadData();
   }
 
   function moduleName(moduleId: string) {
@@ -679,15 +719,20 @@ export default function AdminLessonsPage() {
                   <button
                     type="button"
                     onClick={() => void togglePublished(lesson)}
-                    className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                    disabled={publishingId !== null || saving}
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                   >
+                    {publishingId === lesson.id && (
+                      <LoaderCircle size={15} className="animate-spin" />
+                    )}
                     {lesson.published ? "Unpublish" : "Publish"}
                   </button>
 
                   <button
                     type="button"
                     onClick={() => openEditLesson(lesson)}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-800"
+                    disabled={publishingId !== null || saving}
+                    className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-800 disabled:opacity-50"
                   >
                     <Edit size={16} />
                     Edit
