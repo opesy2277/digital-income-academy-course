@@ -8,9 +8,9 @@ import {
   CheckCircle,
   CirclePlus,
   Edit,
+  ExternalLink,
   LoaderCircle,
   Save,
-  Upload,
   Video,
   X,
 } from "lucide-react";
@@ -50,13 +50,59 @@ const emptyForm: LessonForm = {
   published: false,
 };
 
-const MAX_VIDEO_SIZE = 500 * 1024 * 1024;
+function normalizeGoogleDriveLink(value: string): string {
+  const input = value.trim();
 
-const allowedVideoTypes = [
-  "video/mp4",
-  "video/webm",
-  "video/quicktime",
-];
+  if (!input) return "";
+
+  let url: URL;
+
+  try {
+    url = new URL(input);
+  } catch {
+    throw new Error("Please enter a valid Google Drive sharing link.");
+  }
+
+  if (url.protocol !== "https:") {
+    throw new Error("Please use an HTTPS Google Drive link.");
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  if (
+    hostname !== "drive.google.com" &&
+    hostname !== "docs.google.com"
+  ) {
+    throw new Error(
+      "Please paste a Google Drive video link. Other video URLs are not supported by this form."
+    );
+  }
+
+  const filePathMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
+  const pathId = filePathMatch?.[1];
+  const queryId = url.searchParams.get("id");
+  const fileId = pathId || queryId;
+
+  if (!fileId || !/^[a-zA-Z0-9_-]+$/.test(fileId)) {
+    throw new Error(
+      "We could not find a video file ID in that link. In Google Drive, open the video, select Share, and copy its link."
+    );
+  }
+
+  return `https://drive.google.com/file/d/${fileId}/preview`;
+}
+
+function isGoogleDriveLink(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.hostname.toLowerCase() === "drive.google.com" ||
+      url.hostname.toLowerCase() === "docs.google.com"
+    );
+  } catch {
+    return false;
+  }
+}
 
 export default function AdminLessonsPage() {
   const supabase = useMemo(() => createClient(), []);
@@ -64,7 +110,6 @@ export default function AdminLessonsPage() {
   const [modules, setModules] = useState<ModuleItem[]>([]);
   const [lessons, setLessons] = useState<LessonItem[]>([]);
   const [form, setForm] = useState<LessonForm>(emptyForm);
-  const [selectedVideo, setSelectedVideo] = useState<File | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -94,9 +139,7 @@ export default function AdminLessonsPage() {
       .single();
 
     if (profileError || profile?.role !== "admin") {
-      throw new Error(
-        "This account is not recognized as an administrator."
-      );
+      throw new Error("This account is not recognized as an administrator.");
     }
 
     return user;
@@ -114,6 +157,7 @@ export default function AdminLessonsPage() {
           .from("modules")
           .select("id, module_number, title, published")
           .order("module_number", { ascending: true }),
+
         supabase
           .from("lessons")
           .select(
@@ -138,7 +182,9 @@ export default function AdminLessonsPage() {
       setLessons(lessonResult.data ?? []);
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Could not load lesson management."
+        err instanceof Error
+          ? err.message
+          : "Could not load lesson management."
       );
     } finally {
       setLoading(false);
@@ -151,11 +197,9 @@ export default function AdminLessonsPage() {
 
   function openNewLesson() {
     setEditingId(null);
-    setSelectedVideo(null);
     setForm({
       ...emptyForm,
       module_id: modules[0]?.id ?? "",
-      lesson_number: 1,
     });
     setMessage("");
     setError("");
@@ -164,7 +208,7 @@ export default function AdminLessonsPage() {
 
   function openEditLesson(lesson: LessonItem) {
     setEditingId(lesson.id);
-    setSelectedVideo(null);
+
     setForm({
       module_id: lesson.module_id,
       title: lesson.title,
@@ -173,6 +217,7 @@ export default function AdminLessonsPage() {
       lesson_number: lesson.lesson_number,
       published: lesson.published,
     });
+
     setMessage("");
     setError("");
     setFormOpen(true);
@@ -181,39 +226,9 @@ export default function AdminLessonsPage() {
   function closeForm() {
     setFormOpen(false);
     setEditingId(null);
-    setSelectedVideo(null);
     setForm(emptyForm);
     setMessage("");
     setError("");
-  }
-
-  function handleVideoChange(file: File | null) {
-    setError("");
-    setMessage("");
-
-    if (!file) {
-      setSelectedVideo(null);
-      return;
-    }
-
-    if (!allowedVideoTypes.includes(file.type)) {
-      setError(
-        "Please choose an MP4, WebM, or MOV video. MP4 is recommended."
-      );
-      setSelectedVideo(null);
-      return;
-    }
-
-    if (file.size > MAX_VIDEO_SIZE) {
-      setError(
-        "This video is larger than 500 MB. Please compress it or choose a smaller file."
-      );
-      setSelectedVideo(null);
-      return;
-    }
-
-    setSelectedVideo(file);
-    setMessage("Video selected. It will upload when you save the lesson.");
   }
 
   async function handleSave(event: React.FormEvent<HTMLFormElement>) {
@@ -231,45 +246,34 @@ export default function AdminLessonsPage() {
         throw new Error("Please enter a lesson title.");
       }
 
-      const user = await checkAdmin();
-      let mediaPath = form.media_url.trim() || null;
+      if (
+        !Number.isInteger(Number(form.lesson_number)) ||
+        Number(form.lesson_number) < 1
+      ) {
+        throw new Error("Lesson number must be a whole number greater than 0.");
+      }
 
-      if (selectedVideo) {
-        const extensionByType: Record<string, string> = {
-          "video/mp4": "mp4",
-          "video/webm": "webm",
-          "video/quicktime": "mov",
-        };
+      await checkAdmin();
 
-        const extension = extensionByType[selectedVideo.type];
+      const enteredMediaUrl = form.media_url.trim();
+      let mediaUrl: string | null = enteredMediaUrl || null;
 
-        if (!extension) {
-          throw new Error("Unsupported video format.");
-        }
-
-        const storagePath = `${user.id}/${crypto.randomUUID()}.${extension}`;
-
-        setMessage("Uploading your video. Please keep this page open...");
-
-        const { error: uploadError } = await supabase.storage
-          .from("course-videos")
-          .upload(storagePath, selectedVideo, {
-            contentType: selectedVideo.type,
-            upsert: false,
-          });
-
-        if (uploadError) {
-          throw new Error(`Video upload failed: ${uploadError.message}`);
-        }
-
-        mediaPath = storagePath;
+      if (enteredMediaUrl && isGoogleDriveLink(enteredMediaUrl)) {
+        mediaUrl = normalizeGoogleDriveLink(enteredMediaUrl);
+      } else if (
+        enteredMediaUrl &&
+        /^https?:\/\//i.test(enteredMediaUrl)
+      ) {
+        throw new Error(
+          "Please use a Google Drive video sharing link. Open the video in Google Drive, select Share, and copy the link."
+        );
       }
 
       const lessonData = {
         module_id: form.module_id,
         title: form.title.trim(),
         content: form.content.trim() || null,
-        media_url: mediaPath,
+        media_url: mediaUrl,
         lesson_number: Number(form.lesson_number),
         published: form.published,
       };
@@ -299,13 +303,7 @@ export default function AdminLessonsPage() {
         );
       }
 
-      setMessage(
-        selectedVideo
-          ? "Video uploaded and lesson saved successfully."
-          : "Lesson saved successfully."
-      );
-
-      setSelectedVideo(null);
+      setMessage("Lesson saved successfully.");
       setFormOpen(false);
       setEditingId(null);
 
@@ -342,7 +340,7 @@ export default function AdminLessonsPage() {
 
       if (!data) {
         throw new Error(
-          "No lesson was updated. Supabase did not return an updated row. Check the lesson UPDATE policy."
+          "No lesson was updated. Check the lesson UPDATE policy in Supabase."
         );
       }
 
@@ -399,7 +397,7 @@ export default function AdminLessonsPage() {
           </h1>
 
           <p className="mt-2 text-slate-600">
-            Create lessons, add videos, and control publication.
+            Create lessons, add Google Drive videos, and control publication.
           </p>
         </div>
 
@@ -458,6 +456,7 @@ export default function AdminLessonsPage() {
                 <span className="mb-2 block text-sm font-semibold text-slate-700">
                   Course module
                 </span>
+
                 <select
                   value={form.module_id}
                   onChange={(event) =>
@@ -479,9 +478,11 @@ export default function AdminLessonsPage() {
                 <span className="mb-2 block text-sm font-semibold text-slate-700">
                   Lesson number
                 </span>
+
                 <input
                   type="number"
                   min={1}
+                  step={1}
                   value={form.lesson_number}
                   onChange={(event) =>
                     setForm({
@@ -499,6 +500,7 @@ export default function AdminLessonsPage() {
               <span className="mb-2 block text-sm font-semibold text-slate-700">
                 Lesson title
               </span>
+
               <input
                 type="text"
                 value={form.title}
@@ -515,6 +517,7 @@ export default function AdminLessonsPage() {
               <span className="mb-2 block text-sm font-semibold text-slate-700">
                 Lesson content
               </span>
+
               <textarea
                 value={form.content}
                 onChange={(event) =>
@@ -529,75 +532,77 @@ export default function AdminLessonsPage() {
             <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
               <div className="mb-3 flex items-center gap-2">
                 <Video className="text-blue-700" size={22} />
-                <h3 className="font-bold text-slate-900">Lesson video</h3>
+                <h3 className="font-bold text-slate-900">Google Drive video</h3>
               </div>
 
-              <p className="mb-4 text-sm text-slate-600">
-                Choose a video from your device, or paste a video URL below.
-                If you choose a file, it will replace the current video when
-                you save.
+              <p className="mb-4 text-sm leading-6 text-slate-600">
+                Upload your video to Google Drive first. Then copy its sharing
+                link and paste it below. The portal saves an embedded preview
+                link instead of uploading the video to Supabase.
               </p>
 
-              <label className="flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed border-blue-300 bg-white p-6 text-center hover:bg-blue-50">
-                <Upload size={28} className="mb-2 text-blue-700" />
-
-                <span className="font-semibold text-slate-800">
-                  {selectedVideo
-                    ? "Choose a different video"
-                    : "Choose video from your device"}
-                </span>
-
-                <span className="mt-1 text-sm text-slate-500">
-                  MP4 recommended · WebM and MOV supported · Maximum 500 MB
-                </span>
-
-                <input
-                  type="file"
-                  accept="video/mp4,video/webm,video/quicktime"
-                  className="mt-4 block max-w-full text-sm"
-                  onChange={(event) =>
-                    handleVideoChange(event.target.files?.[0] ?? null)
-                  }
-                />
-              </label>
-
-              {selectedVideo && (
-                <div className="mt-3 flex items-start gap-2 text-sm text-green-800">
-                  <CheckCircle size={18} className="mt-0.5 shrink-0" />
-                  <span>
-                    <strong>{selectedVideo.name}</strong>
-                    <br />
-                    {(selectedVideo.size / (1024 * 1024)).toFixed(1)} MB —
-                    ready to upload when you save.
-                  </span>
-                </div>
-              )}
-
-              <div className="my-4 flex items-center gap-3 text-xs font-semibold uppercase text-slate-500">
-                <div className="h-px flex-1 bg-slate-200" />
-                Or use a video URL
-                <div className="h-px flex-1 bg-slate-200" />
-              </div>
+              <ol className="mb-4 list-decimal space-y-1 pl-5 text-sm text-slate-600">
+                <li>Open Google Drive and select your video.</li>
+                <li>Choose Share, then copy the video link.</li>
+                <li>Check that the intended viewers can open the video.</li>
+                <li>Paste the link in the field below.</li>
+              </ol>
 
               <label className="block">
                 <span className="mb-2 block text-sm font-semibold text-slate-700">
-                  Video URL
+                  Google Drive sharing link
                 </span>
+
                 <input
                   type="url"
                   value={form.media_url}
                   onChange={(event) =>
                     setForm({ ...form, media_url: event.target.value })
                   }
-                  disabled={!!selectedVideo}
-                  placeholder="https://example.com/your-video.mp4"
-                  className="w-full rounded-lg border border-slate-300 bg-white p-3 disabled:bg-slate-100"
+                  placeholder="https://drive.google.com/file/d/..."
+                  className="w-full rounded-lg border border-slate-300 bg-white p-3"
                 />
               </label>
 
-              <p className="mt-2 text-xs text-slate-500">
-                For a newly uploaded file, the private storage path is saved
-                automatically. Selecting a file takes priority over the URL.
+              {form.media_url.trim() &&
+                isGoogleDriveLink(form.media_url.trim()) && (
+                  <div className="mt-3 flex items-start gap-2 text-sm text-green-800">
+                    <CheckCircle size={18} className="mt-0.5 shrink-0" />
+                    <span>
+                      Google Drive link detected. Its preview URL will be
+                      saved when you save this lesson.
+                    </span>
+                  </div>
+                )}
+
+              {form.media_url.trim() &&
+                !isGoogleDriveLink(form.media_url.trim()) && (
+                  <p className="mt-2 text-sm text-amber-800">
+                    Paste a Google Drive sharing link to add or replace a
+                    video. If this lesson has an older Supabase video path,
+                    leave it unchanged to preserve the existing value.
+                  </p>
+                )}
+
+              {form.media_url.trim() &&
+                /^https?:\/\//i.test(form.media_url.trim()) &&
+                !isGoogleDriveLink(form.media_url.trim()) && (
+                  <a
+                    href={form.media_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-flex items-center gap-2 text-sm font-semibold text-blue-700 underline"
+                  >
+                    Open current video link
+                    <ExternalLink size={14} />
+                  </a>
+                )}
+
+              <p className="mt-3 text-xs leading-5 text-slate-500">
+                Important: anyone with access to an unlisted or publicly
+                shared Drive link may be able to share it with others.
+                Restricting access to this lesson page does not fully protect
+                the original Drive video link.
               </p>
             </div>
 
@@ -610,6 +615,7 @@ export default function AdminLessonsPage() {
                 }
                 className="h-4 w-4"
               />
+
               <span className="text-sm font-semibold text-slate-700">
                 Publish this lesson
               </span>
@@ -624,9 +630,7 @@ export default function AdminLessonsPage() {
               </div>
             )}
 
-            {message && (
-              <p className="text-sm text-blue-700">{message}</p>
-            )}
+            {message && <p className="text-sm text-blue-700">{message}</p>}
 
             <div className="flex flex-wrap gap-3">
               <button
@@ -660,6 +664,7 @@ export default function AdminLessonsPage() {
           <h2 className="text-xl font-bold text-slate-900">
             Existing lessons
           </h2>
+
           <span className="text-sm text-slate-500">
             {lessons.length} lesson{lessons.length === 1 ? "" : "s"}
           </span>
