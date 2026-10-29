@@ -40,6 +40,49 @@ type ProgressRecord = {
   completed_at: string | null;
 };
 
+type VideoType = "drive" | "direct" | "storage" | "none";
+
+function getGoogleDrivePreviewUrl(value: string): string | null {
+  const trimmed = value.trim();
+
+  if (!trimmed) return null;
+
+  try {
+    const url = new URL(trimmed);
+
+    if (
+      url.hostname !== "drive.google.com" &&
+      url.hostname !== "www.drive.google.com" &&
+      url.hostname !== "docs.google.com"
+    ) {
+      return null;
+    }
+
+    const fileMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
+    const fileId = fileMatch?.[1] || url.searchParams.get("id");
+
+    if (!fileId) return null;
+
+    return `https://drive.google.com/file/d/${encodeURIComponent(
+      fileId
+    )}/preview`;
+  } catch {
+    return null;
+  }
+}
+
+function getVideoType(value: string | null): VideoType {
+  if (!value?.trim()) return "none";
+
+  const trimmed = value.trim();
+
+  if (getGoogleDrivePreviewUrl(trimmed)) return "drive";
+
+  if (/^https?:\/\//i.test(trimmed)) return "direct";
+
+  return "storage";
+}
+
 function StudentModuleContent() {
   const params = useParams<{ id: string }>();
   const moduleId = params.id;
@@ -51,10 +94,13 @@ function StudentModuleContent() {
     Record<string, string | null>
   >({});
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
+
   const [videoUrl, setVideoUrl] = useState("");
+  const [videoType, setVideoType] = useState<VideoType>("none");
   const [videoLoading, setVideoLoading] = useState(false);
   const [videoError, setVideoError] = useState("");
   const [videoRetry, setVideoRetry] = useState(0);
+
   const [loading, setLoading] = useState(true);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -199,37 +245,41 @@ function StudentModuleContent() {
       setVideoUrl("");
       setVideoError("");
       setVideoLoading(false);
+      setVideoType(getVideoType(activeLesson?.media_url ?? null));
 
       if (!activeLesson?.media_url?.trim()) {
+        setVideoType("none");
         return;
       }
 
       const path = activeLesson.media_url.trim();
 
-      // External video URLs do not require a Supabase signed URL.
+      // Google Drive videos must use an embed URL and an iframe.
+      const drivePreviewUrl = getGoogleDrivePreviewUrl(path);
+
+      if (drivePreviewUrl) {
+        setVideoType("drive");
+        setVideoUrl(drivePreviewUrl);
+        return;
+      }
+
+      // Other external HTTP(S) video links are used directly.
       if (/^https?:\/\//i.test(path)) {
+        setVideoType("direct");
         setVideoUrl(path);
         return;
       }
 
+      // Older lessons may still reference Supabase Storage paths.
+      setVideoType("storage");
       setVideoLoading(true);
 
       try {
         const supabase = createClient();
 
-        // Storage paths must be relative to the bucket.
-        // Example:
-        // folder-name/video-file.mp4
         const objectPath = path
           .replace(/^\/+/, "")
           .replace(/^course-videos\//, "");
-
-        console.log("Video request details", {
-          bucket: "course-videos",
-          path: JSON.stringify(objectPath),
-          project: process.env.NEXT_PUBLIC_SUPABASE_URL,
-          lessonId: activeLesson.id,
-        });
 
         const { data, error: signedUrlError } = await supabase.storage
           .from("course-videos")
@@ -240,10 +290,9 @@ function StudentModuleContent() {
         if (signedUrlError) {
           console.error("Could not create course video URL:", {
             message: signedUrlError.message,
-            name: signedUrlError.name,
-            status: signedUrlError.status,
             bucket: "course-videos",
             objectPath,
+            lessonId: activeLesson.id,
           });
 
           setVideoError(
@@ -534,6 +583,24 @@ function StudentModuleContent() {
                             Try again
                           </button>
                         </div>
+                      ) : videoLoading ? (
+                        <div className="flex min-h-40 items-center justify-center gap-2 p-6 text-sm text-white">
+                          <LoaderCircle
+                            className="animate-spin"
+                            size={20}
+                          />
+                          Preparing lesson video...
+                        </div>
+                      ) : videoUrl && videoType === "drive" ? (
+                        <iframe
+                          key={videoUrl}
+                          src={videoUrl}
+                          title={`Video for ${activeLesson.title}`}
+                          className="aspect-video w-full"
+                          allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+                          allowFullScreen
+                          referrerPolicy="strict-origin-when-cross-origin"
+                        />
                       ) : videoUrl ? (
                         <video
                           key={videoUrl}
@@ -544,28 +611,25 @@ function StudentModuleContent() {
                           src={videoUrl}
                           onError={() =>
                             setVideoError(
-                              "The URL was created, but your browser could not play the file. Check the file format and Storage URL."
+                              "The video URL was opened, but your browser could not play the file. Check that the link is accessible and the file format is supported."
                             )
                           }
                         >
                           Your browser does not support video playback.
                         </video>
                       ) : (
-                        <div className="flex min-h-40 items-center justify-center gap-2 p-6 text-sm text-white">
-                          {videoLoading ? (
-                            <>
-                              <LoaderCircle
-                                className="animate-spin"
-                                size={20}
-                              />
-                              Preparing lesson video...
-                            </>
-                          ) : (
-                            "No video is available for this lesson."
-                          )}
+                        <div className="flex min-h-40 items-center justify-center p-6 text-sm text-white">
+                          No video is available for this lesson.
                         </div>
                       )}
                     </div>
+                  )}
+
+                  {videoType === "drive" && videoUrl && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      Video hosted on Google Drive. If it does not play, check
+                      that its sharing permission allows viewers with the link.
+                    </p>
                   )}
 
                   <div className="mt-6 whitespace-pre-wrap break-words text-sm leading-7 text-slate-700">
