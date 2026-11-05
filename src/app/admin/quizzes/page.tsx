@@ -50,7 +50,6 @@ type SupabaseErrorDetails = {
   code?: string;
   details?: string;
   hint?: string;
-  name?: string;
   status?: number;
   statusCode?: number;
 };
@@ -63,22 +62,7 @@ const emptyQuestion = (): Question => ({
 });
 
 function getErrorMessage(error: unknown): string {
-  if (typeof error === "string") {
-    return error;
-  }
-
-  if (error instanceof Error) {
-    const details = error as Error & SupabaseErrorDetails;
-
-    return [
-      details.message || "An unknown error occurred.",
-      details.code ? `Code: ${details.code}` : "",
-      details.details ? `Details: ${details.details}` : "",
-      details.hint ? `Hint: ${details.hint}` : "",
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
+  if (typeof error === "string") return error;
 
   if (typeof error === "object" && error !== null) {
     const details = error as SupabaseErrorDetails;
@@ -88,8 +72,6 @@ function getErrorMessage(error: unknown): string {
       details.code ? `Code: ${details.code}` : "",
       details.details ? `Details: ${details.details}` : "",
       details.hint ? `Hint: ${details.hint}` : "",
-      details.status ? `HTTP status: ${details.status}` : "",
-      details.statusCode ? `Status code: ${details.statusCode}` : "",
     ]
       .filter(Boolean)
       .join(" | ");
@@ -99,27 +81,6 @@ function getErrorMessage(error: unknown): string {
 }
 
 function logSupabaseError(label: string, error: unknown) {
-  if (typeof error === "object" && error !== null) {
-    const err = error as Record<string, unknown>;
-
-    const details = {
-      message: err.message,
-      code: err.code,
-      details: err.details,
-      hint: err.hint,
-      name: err.name,
-      status: err.status,
-      statusCode: err.statusCode,
-      serialized: JSON.stringify(
-        error,
-        Object.getOwnPropertyNames(error)
-      ),
-    };
-
-    console.error(label, details);
-    return;
-  }
-
   console.error(label, error);
 }
 
@@ -151,15 +112,11 @@ export default function AdminQuizzesPage() {
       await supabase.auth.getUser();
 
     if (authError) {
-      throw new Error(
-        `Could not verify your login: ${authError.message}`
-      );
+      throw new Error(`Could not verify your login: ${authError.message}`);
     }
 
     if (!authData.user) {
-      throw new Error(
-        "Your session has expired. Please sign in again."
-      );
+      throw new Error("Your session has expired. Please sign in again.");
     }
 
     const { data: profile, error: profileError } = await supabase
@@ -175,18 +132,8 @@ export default function AdminQuizzesPage() {
       );
     }
 
-    console.info("QUIZ ADMIN CHECK", {
-      userId: authData.user.id,
-      email: authData.user.email,
-      role: profile?.role ?? null,
-    });
-
     if (profile?.role !== "admin") {
-      throw new Error(
-        `The signed-in account ${
-          authData.user.email ?? ""
-        } does not have the admin role. Sign in with an administrator account.`
-      );
+      throw new Error("This account does not have administrator access.");
     }
 
     return authData.user;
@@ -212,14 +159,12 @@ export default function AdminQuizzesPage() {
       ]);
 
       if (moduleResult.error) {
-        logSupabaseError("MODULE LOAD ERROR", moduleResult.error);
         throw new Error(
           `Could not load modules: ${getErrorMessage(moduleResult.error)}`
         );
       }
 
       if (quizResult.error) {
-        logSupabaseError("QUIZ LOAD ERROR", quizResult.error);
         throw new Error(
           `Could not load quizzes: ${getErrorMessage(quizResult.error)}`
         );
@@ -229,14 +174,13 @@ export default function AdminQuizzesPage() {
       setQuizzes((quizResult.data ?? []) as Quiz[]);
     } catch (error) {
       const errorMessage = getErrorMessage(error);
-
       console.error("QUIZ INITIALIZATION FAILED", error);
       setMessage(errorMessage);
       setMessageType("error");
 
       if (
         errorMessage.includes("session has expired") ||
-        errorMessage.includes("does not have the admin role")
+        errorMessage.includes("administrator access")
       ) {
         router.replace("/");
       }
@@ -274,7 +218,6 @@ export default function AdminQuizzesPage() {
         .order("question_number");
 
       if (error) {
-        logSupabaseError("QUIZ QUESTION LOAD ERROR", error);
         throw new Error(getErrorMessage(error));
       }
 
@@ -294,17 +237,12 @@ export default function AdminQuizzesPage() {
 
       setMessage("");
     } catch (error) {
-      setMessage(
-        `Could not load questions: ${getErrorMessage(error)}`
-      );
+      setMessage(`Could not load questions: ${getErrorMessage(error)}`);
       setMessageType("error");
     }
   }
 
-  function updateQuestion(
-    index: number,
-    changes: Partial<Question>
-  ) {
+  function updateQuestion(index: number, changes: Partial<Question>) {
     setQuestions((current) =>
       current.map((question, i) =>
         i === index ? { ...question, ...changes } : question
@@ -365,9 +303,7 @@ export default function AdminQuizzesPage() {
         answerIndex < 0 ||
         answerIndex >= question.options.length
       ) {
-        setMessage(
-          `Choose the correct answer for question ${index + 1}.`
-        );
+        setMessage(`Choose the correct answer for question ${index + 1}.`);
         setMessageType("error");
         return;
       }
@@ -378,16 +314,7 @@ export default function AdminQuizzesPage() {
     setMessageType("info");
 
     try {
-      const user = await verifyAdmin();
-
-      console.info("QUIZ SAVE START", {
-        userId: user.id,
-        email: user.email,
-        editingQuiz: Boolean(selectedQuiz),
-        quizTitle: title.trim(),
-        moduleId: moduleId || null,
-        isFinalExam,
-      });
+      await verifyAdmin();
 
       let quizId = selectedQuiz;
 
@@ -402,55 +329,37 @@ export default function AdminQuizzesPage() {
           .eq("id", quizId);
 
         if (error) {
-          logSupabaseError("QUIZ UPDATE ERROR", error);
           throw new Error(
             `Could not update quiz: ${getErrorMessage(error)}`
           );
         }
       } else {
-        const payload = {
-          title: title.trim(),
-          module_id: moduleId || null,
-          is_final_exam: isFinalExam,
-          published: false,
-        };
-
-        console.info("QUIZ INSERT PAYLOAD", payload);
-
         const { data, error } = await supabase
           .from("quizzes")
-          .insert(payload)
+          .insert({
+            title: title.trim(),
+            module_id: moduleId || null,
+            is_final_exam: isFinalExam,
+            published: false,
+          })
           .select("id")
           .single();
 
         if (error) {
-          logSupabaseError("QUIZ INSERT ERROR DETAILS", error);
           throw new Error(
             `Could not create quiz: ${getErrorMessage(error)}`
           );
         }
 
         if (!data?.id) {
-          throw new Error(
-            "Supabase did not return the new quiz ID."
-          );
+          throw new Error("Supabase did not return the new quiz ID.");
         }
 
         quizId = data.id;
       }
 
-      const { error: deleteError } = await supabase
-        .from("quiz_questions")
-        .delete()
-        .eq("quiz_id", quizId);
-
-      if (deleteError) {
-        logSupabaseError("QUIZ QUESTION DELETE ERROR", deleteError);
-        throw new Error(
-          `Quiz was saved, but its old questions could not be replaced: ${getErrorMessage(deleteError)}`
-        );
-      }
-
+      // Save questions using the unique quiz_id + question_number key.
+      // Existing question numbers are updated instead of duplicated.
       if (questions.length > 0) {
         const rows = questions.map((question, index) => ({
           quiz_id: quizId,
@@ -460,19 +369,33 @@ export default function AdminQuizzesPage() {
           question_number: index + 1,
         }));
 
-        const { error: insertError } = await supabase
+        const { error: upsertError } = await supabase
           .from("quiz_questions")
-          .insert(rows);
+          .upsert(rows, {
+            onConflict: "quiz_id,question_number",
+          });
 
-        if (insertError) {
-          logSupabaseError(
-            "QUIZ QUESTION INSERT ERROR",
-            insertError
-          );
+        if (upsertError) {
+          logSupabaseError("QUIZ QUESTION UPSERT ERROR", upsertError);
           throw new Error(
-            `Quiz was saved, but its questions could not be saved: ${getErrorMessage(insertError)}`
+            `Quiz details were saved, but its questions could not be saved: ${getErrorMessage(upsertError)}`
           );
         }
+      }
+
+      // Remove only question numbers that are no longer in the form.
+      // This avoids deleting and recreating every existing question.
+      const { error: cleanupError } = await supabase
+        .from("quiz_questions")
+        .delete()
+        .eq("quiz_id", quizId)
+        .gt("question_number", questions.length);
+
+      if (cleanupError) {
+        logSupabaseError("QUIZ QUESTION CLEANUP ERROR", cleanupError);
+        throw new Error(
+          `Quiz questions were saved, but removed questions could not be cleaned up: ${getErrorMessage(cleanupError)}`
+        );
       }
 
       setSelectedQuiz(quizId);
@@ -482,10 +405,8 @@ export default function AdminQuizzesPage() {
       await initialize();
       setSelectedQuiz(quizId);
     } catch (error) {
-      const errorMessage = getErrorMessage(error);
-
       console.error("QUIZ SAVE FAILED", error);
-      setMessage(errorMessage);
+      setMessage(getErrorMessage(error));
       setMessageType("error");
     } finally {
       setBusy(false);
@@ -509,7 +430,6 @@ export default function AdminQuizzesPage() {
         .maybeSingle();
 
       if (error) {
-        logSupabaseError("QUIZ PUBLICATION ERROR", error);
         throw new Error(
           `Could not update publication status: ${getErrorMessage(error)}`
         );
@@ -529,9 +449,7 @@ export default function AdminQuizzesPage() {
         )
       );
 
-      setMessage(
-        data.published ? "Quiz published." : "Quiz unpublished."
-      );
+      setMessage(data.published ? "Quiz published." : "Quiz unpublished.");
       setMessageType("success");
     } catch (error) {
       setMessage(getErrorMessage(error));
@@ -558,9 +476,7 @@ export default function AdminQuizzesPage() {
             <p className="text-sm font-semibold uppercase tracking-wide text-blue-700">
               Digital Income Academy
             </p>
-            <h1 className="mt-2 text-3xl font-bold">
-              Quiz Management
-            </h1>
+            <h1 className="mt-2 text-3xl font-bold">Quiz Management</h1>
             <p className="mt-2 text-slate-600">
               Create, edit and publish course quizzes.
             </p>
@@ -611,9 +527,7 @@ export default function AdminQuizzesPage() {
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="space-y-2">
-              <span className="block text-sm font-medium">
-                Quiz title
-              </span>
+              <span className="block text-sm font-medium">Quiz title</span>
               <input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
@@ -623,9 +537,7 @@ export default function AdminQuizzesPage() {
             </label>
 
             <label className="space-y-2">
-              <span className="block text-sm font-medium">
-                Course module
-              </span>
+              <span className="block text-sm font-medium">Course module</span>
               <select
                 value={moduleId}
                 onChange={(event) => setModuleId(event.target.value)}
@@ -645,9 +557,7 @@ export default function AdminQuizzesPage() {
             <input
               type="checkbox"
               checked={isFinalExam}
-              onChange={(event) =>
-                setIsFinalExam(event.target.checked)
-              }
+              onChange={(event) => setIsFinalExam(event.target.checked)}
               className="h-4 w-4"
             />
             This is the final examination
@@ -681,9 +591,7 @@ export default function AdminQuizzesPage() {
                 className="rounded-xl border border-slate-200 bg-slate-50 p-4"
               >
                 <div className="mb-4 flex items-center justify-between gap-3">
-                  <h4 className="font-bold">
-                    Question {index + 1}
-                  </h4>
+                  <h4 className="font-bold">Question {index + 1}</h4>
 
                   <button
                     type="button"
@@ -726,11 +634,7 @@ export default function AdminQuizzesPage() {
                       <input
                         value={option}
                         onChange={(event) =>
-                          updateOption(
-                            index,
-                            optionIndex,
-                            event.target.value
-                          )
+                          updateOption(index, optionIndex, event.target.value)
                         }
                         placeholder={`Answer option ${optionIndex + 1}`}
                         className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2"
@@ -740,9 +644,7 @@ export default function AdminQuizzesPage() {
                 </div>
 
                 <label className="mt-4 block space-y-2">
-                  <span className="text-sm font-medium">
-                    Correct answer
-                  </span>
+                  <span className="text-sm font-medium">Correct answer</span>
 
                   <select
                     value={question.correct_answer}
@@ -754,10 +656,7 @@ export default function AdminQuizzesPage() {
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-3 sm:max-w-md"
                   >
                     {question.options.map((option, optionIndex) => (
-                      <option
-                        key={optionIndex}
-                        value={String(optionIndex)}
-                      >
+                      <option key={optionIndex} value={String(optionIndex)}>
                         {String.fromCharCode(65 + optionIndex)} —{" "}
                         {option || `Option ${optionIndex + 1}`}
                       </option>
