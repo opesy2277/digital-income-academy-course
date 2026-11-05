@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useState } from "react";
@@ -50,8 +49,6 @@ type SupabaseErrorDetails = {
   code?: string;
   details?: string;
   hint?: string;
-  status?: number;
-  statusCode?: number;
 };
 
 const emptyQuestion = (): Question => ({
@@ -90,13 +87,17 @@ export default function AdminQuizzesPage() {
 
   const [modules, setModules] = useState<Module[]>([]);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
+
   const [selectedQuiz, setSelectedQuiz] = useState("");
   const [questions, setQuestions] = useState<Question[]>([]);
+
   const [title, setTitle] = useState("");
   const [moduleId, setModuleId] = useState("");
   const [isFinalExam, setIsFinalExam] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
+
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState<
     "error" | "success" | "info"
@@ -107,6 +108,7 @@ export default function AdminQuizzesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Verify the current signed-in user is an administrator.
   async function verifyAdmin() {
     const { data: authData, error: authError } =
       await supabase.auth.getUser();
@@ -139,6 +141,7 @@ export default function AdminQuizzesPage() {
     return authData.user;
   }
 
+  // Load modules and existing quizzes.
   async function initialize() {
     setLoading(true);
     setMessage("");
@@ -174,6 +177,7 @@ export default function AdminQuizzesPage() {
       setQuizzes((quizResult.data ?? []) as Quiz[]);
     } catch (error) {
       const errorMessage = getErrorMessage(error);
+
       console.error("QUIZ INITIALIZATION FAILED", error);
       setMessage(errorMessage);
       setMessageType("error");
@@ -199,12 +203,16 @@ export default function AdminQuizzesPage() {
     setMessageType("info");
   }
 
+  // Load a saved quiz and its questions into the editor.
   async function editQuiz(quiz: Quiz) {
+    if (busy) return;
+
     setSelectedQuiz(quiz.id);
     setTitle(quiz.title);
     setModuleId(quiz.module_id ?? "");
     setIsFinalExam(quiz.is_final_exam);
     setQuestions([]);
+
     setMessage("Loading quiz questions...");
     setMessageType("info");
 
@@ -228,8 +236,8 @@ export default function AdminQuizzesPage() {
           id: item.id,
           question: item.question,
           options: Array.isArray(item.options)
-            ? item.options.map((option: unknown) => String(option))
-            : [],
+            ? item.options.map((option) => String(option))
+            : ["", "", "", ""],
           correct_answer: String(item.correct_answer),
           question_number: item.question_number,
         }))
@@ -237,6 +245,7 @@ export default function AdminQuizzesPage() {
 
       setMessage("");
     } catch (error) {
+      console.error("LOAD QUIZ QUESTIONS FAILED", error);
       setMessage(`Could not load questions: ${getErrorMessage(error)}`);
       setMessageType("error");
     }
@@ -269,6 +278,28 @@ export default function AdminQuizzesPage() {
     );
   }
 
+  function addQuestion() {
+    setQuestions((current) => [
+      ...current,
+      {
+        ...emptyQuestion(),
+        question_number: current.length + 1,
+      },
+    ]);
+  }
+
+  function removeQuestion(index: number) {
+    setQuestions((current) =>
+      current
+        .filter((_, i) => i !== index)
+        .map((question, i) => ({
+          ...question,
+          question_number: i + 1,
+        }))
+    );
+  }
+
+  // Save a new quiz or update an existing quiz.
   async function saveQuiz() {
     if (busy) return;
 
@@ -314,23 +345,35 @@ export default function AdminQuizzesPage() {
     setMessageType("info");
 
     try {
-      await verifyAdmin();
+      const user = await verifyAdmin();
+
+      // Keep the signed-in user ID in the console for RLS troubleshooting.
+      console.info("QUIZ SAVE ADMIN USER ID:", user.id);
 
       let quizId = selectedQuiz;
 
       if (quizId) {
-        const { error } = await supabase
+        const { data, error } = await supabase
           .from("quizzes")
           .update({
             title: title.trim(),
             module_id: moduleId || null,
             is_final_exam: isFinalExam,
           })
-          .eq("id", quizId);
+          .eq("id", quizId)
+          .select("id")
+          .maybeSingle();
 
         if (error) {
+          logSupabaseError("QUIZ UPDATE ERROR", error);
           throw new Error(
             `Could not update quiz: ${getErrorMessage(error)}`
+          );
+        }
+
+        if (!data) {
+          throw new Error(
+            "No quiz was updated. Check the quizzes table UPDATE policy."
           );
         }
       } else {
@@ -346,6 +389,7 @@ export default function AdminQuizzesPage() {
           .single();
 
         if (error) {
+          logSupabaseError("QUIZ INSERT ERROR", error);
           throw new Error(
             `Could not create quiz: ${getErrorMessage(error)}`
           );
@@ -358,8 +402,7 @@ export default function AdminQuizzesPage() {
         quizId = data.id;
       }
 
-      // Save questions using the unique quiz_id + question_number key.
-      // Existing question numbers are updated instead of duplicated.
+      // Save the questions using the quiz_id + question_number unique key.
       if (questions.length > 0) {
         const rows = questions.map((question, index) => ({
           quiz_id: quizId,
@@ -377,14 +420,14 @@ export default function AdminQuizzesPage() {
 
         if (upsertError) {
           logSupabaseError("QUIZ QUESTION UPSERT ERROR", upsertError);
+
           throw new Error(
-            `Quiz details were saved, but its questions could not be saved: ${getErrorMessage(upsertError)}`
+            `The quiz details were saved, but its questions could not be saved: ${getErrorMessage(upsertError)}. Signed-in admin ID: ${user.id}`
           );
         }
       }
 
-      // Remove only question numbers that are no longer in the form.
-      // This avoids deleting and recreating every existing question.
+      // Remove questions that are beyond the current question count.
       const { error: cleanupError } = await supabase
         .from("quiz_questions")
         .delete()
@@ -393,8 +436,9 @@ export default function AdminQuizzesPage() {
 
       if (cleanupError) {
         logSupabaseError("QUIZ QUESTION CLEANUP ERROR", cleanupError);
+
         throw new Error(
-          `Quiz questions were saved, but removed questions could not be cleaned up: ${getErrorMessage(cleanupError)}`
+          `Questions were saved, but old questions could not be cleaned up: ${getErrorMessage(cleanupError)}`
         );
       }
 
@@ -413,6 +457,7 @@ export default function AdminQuizzesPage() {
     }
   }
 
+  // Publish or unpublish a quiz.
   async function togglePublished(quiz: Quiz) {
     if (busy) return;
 
@@ -430,6 +475,8 @@ export default function AdminQuizzesPage() {
         .maybeSingle();
 
       if (error) {
+        logSupabaseError("QUIZ PUBLICATION ERROR", error);
+
         throw new Error(
           `Could not update publication status: ${getErrorMessage(error)}`
         );
@@ -452,6 +499,79 @@ export default function AdminQuizzesPage() {
       setMessage(data.published ? "Quiz published." : "Quiz unpublished.");
       setMessageType("success");
     } catch (error) {
+      console.error("TOGGLE QUIZ PUBLICATION FAILED", error);
+      setMessage(getErrorMessage(error));
+      setMessageType("error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Permanently delete a saved quiz and its questions.
+  async function deleteQuiz(quiz: Quiz) {
+    if (busy) return;
+
+    const confirmed = window.confirm(
+      `Are you sure you want to permanently delete "${quiz.title}" and all its questions? This action cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    setBusy(true);
+    setMessage("Deleting quiz...");
+    setMessageType("info");
+
+    try {
+      await verifyAdmin();
+
+      // Delete the questions first so they do not remain orphaned.
+      const { error: questionsError } = await supabase
+        .from("quiz_questions")
+        .delete()
+        .eq("quiz_id", quiz.id);
+
+      if (questionsError) {
+        logSupabaseError("DELETE QUIZ QUESTIONS ERROR", questionsError);
+
+        throw new Error(
+          `Could not delete the quiz questions: ${getErrorMessage(questionsError)}`
+        );
+      }
+
+      // Then delete the quiz itself.
+      const { data, error: quizError } = await supabase
+        .from("quizzes")
+        .delete()
+        .eq("id", quiz.id)
+        .select("id")
+        .maybeSingle();
+
+      if (quizError) {
+        logSupabaseError("DELETE QUIZ ERROR", quizError);
+
+        throw new Error(
+          `The questions were deleted, but the quiz could not be deleted: ${getErrorMessage(quizError)}`
+        );
+      }
+
+      if (!data) {
+        throw new Error(
+          "The quiz was not deleted. Check the DELETE policy on the quizzes table."
+        );
+      }
+
+      setQuizzes((current) =>
+        current.filter((item) => item.id !== quiz.id)
+      );
+
+      if (selectedQuiz === quiz.id) {
+        resetForm();
+      }
+
+      setMessage("Quiz and its questions deleted successfully.");
+      setMessageType("success");
+    } catch (error) {
+      console.error("DELETE QUIZ FAILED", error);
       setMessage(getErrorMessage(error));
       setMessageType("error");
     } finally {
@@ -476,9 +596,13 @@ export default function AdminQuizzesPage() {
             <p className="text-sm font-semibold uppercase tracking-wide text-blue-700">
               Digital Income Academy
             </p>
-            <h1 className="mt-2 text-3xl font-bold">Quiz Management</h1>
+
+            <h1 className="mt-2 text-3xl font-bold">
+              Quiz Management
+            </h1>
+
             <p className="mt-2 text-slate-600">
-              Create, edit and publish course quizzes.
+              Create, edit, publish and delete course quizzes.
             </p>
           </div>
 
@@ -520,6 +644,7 @@ export default function AdminQuizzesPage() {
           </div>
         )}
 
+        {/* Quiz editor */}
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-xl font-bold">
             {selectedQuiz ? "Edit Quiz" : "Create Quiz"}
@@ -527,7 +652,10 @@ export default function AdminQuizzesPage() {
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="space-y-2">
-              <span className="block text-sm font-medium">Quiz title</span>
+              <span className="block text-sm font-medium">
+                Quiz title
+              </span>
+
               <input
                 value={title}
                 onChange={(event) => setTitle(event.target.value)}
@@ -537,13 +665,17 @@ export default function AdminQuizzesPage() {
             </label>
 
             <label className="space-y-2">
-              <span className="block text-sm font-medium">Course module</span>
+              <span className="block text-sm font-medium">
+                Course module
+              </span>
+
               <select
                 value={moduleId}
                 onChange={(event) => setModuleId(event.target.value)}
                 className="w-full rounded-lg border border-slate-300 bg-white px-3 py-3"
               >
                 <option value="">Not linked to a module</option>
+
                 {modules.map((module) => (
                   <option key={module.id} value={module.id}>
                     Module {module.module_number}: {module.title}
@@ -560,6 +692,7 @@ export default function AdminQuizzesPage() {
               onChange={(event) => setIsFinalExam(event.target.checked)}
               className="h-4 w-4"
             />
+
             This is the final examination
           </label>
 
@@ -568,16 +701,9 @@ export default function AdminQuizzesPage() {
 
             <button
               type="button"
-              onClick={() =>
-                setQuestions((current) => [
-                  ...current,
-                  {
-                    ...emptyQuestion(),
-                    question_number: current.length + 1,
-                  },
-                ])
-              }
-              className="inline-flex items-center gap-2 rounded-lg border border-blue-700 px-3 py-2 font-medium text-blue-700 hover:bg-blue-50"
+              onClick={addQuestion}
+              disabled={busy}
+              className="inline-flex items-center gap-2 rounded-lg border border-blue-700 px-3 py-2 font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
             >
               <Plus size={17} />
               Add Question
@@ -591,22 +717,16 @@ export default function AdminQuizzesPage() {
                 className="rounded-xl border border-slate-200 bg-slate-50 p-4"
               >
                 <div className="mb-4 flex items-center justify-between gap-3">
-                  <h4 className="font-bold">Question {index + 1}</h4>
+                  <h4 className="font-bold">
+                    Question {index + 1}
+                  </h4>
 
                   <button
                     type="button"
-                    onClick={() =>
-                      setQuestions((current) =>
-                        current
-                          .filter((_, i) => i !== index)
-                          .map((item, i) => ({
-                            ...item,
-                            question_number: i + 1,
-                          }))
-                      )
-                    }
+                    onClick={() => removeQuestion(index)}
+                    disabled={busy}
                     aria-label={`Remove question ${index + 1}`}
-                    className="rounded-lg p-2 text-red-600 hover:bg-red-50"
+                    className="rounded-lg p-2 text-red-600 hover:bg-red-50 disabled:opacity-50"
                   >
                     <Trash2 size={18} />
                   </button>
@@ -634,7 +754,11 @@ export default function AdminQuizzesPage() {
                       <input
                         value={option}
                         onChange={(event) =>
-                          updateOption(index, optionIndex, event.target.value)
+                          updateOption(
+                            index,
+                            optionIndex,
+                            event.target.value
+                          )
                         }
                         placeholder={`Answer option ${optionIndex + 1}`}
                         className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2"
@@ -644,7 +768,9 @@ export default function AdminQuizzesPage() {
                 </div>
 
                 <label className="mt-4 block space-y-2">
-                  <span className="text-sm font-medium">Correct answer</span>
+                  <span className="text-sm font-medium">
+                    Correct answer
+                  </span>
 
                   <select
                     value={question.correct_answer}
@@ -656,7 +782,10 @@ export default function AdminQuizzesPage() {
                     className="w-full rounded-lg border border-slate-300 bg-white px-3 py-3 sm:max-w-md"
                   >
                     {question.options.map((option, optionIndex) => (
-                      <option key={optionIndex} value={String(optionIndex)}>
+                      <option
+                        key={optionIndex}
+                        value={String(optionIndex)}
+                      >
                         {String.fromCharCode(65 + optionIndex)} —{" "}
                         {option || `Option ${optionIndex + 1}`}
                       </option>
@@ -684,13 +813,17 @@ export default function AdminQuizzesPage() {
             ) : (
               <Save size={18} />
             )}
+
             {busy ? "Saving..." : "Save Quiz"}
           </button>
         </section>
 
+        {/* Existing quizzes */}
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-xl font-bold">Existing Quizzes</h2>
+            <h2 className="text-xl font-bold">
+              Existing Quizzes
+            </h2>
 
             <button
               type="button"
@@ -715,7 +848,9 @@ export default function AdminQuizzesPage() {
                   className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-slate-200 p-4"
                 >
                   <div>
-                    <h3 className="font-semibold">{quiz.title}</h3>
+                    <h3 className="font-semibold">
+                      {quiz.title}
+                    </h3>
 
                     <div className="mt-2 flex flex-wrap gap-2 text-xs">
                       <span className="rounded-full bg-slate-100 px-2 py-1">
@@ -755,7 +890,18 @@ export default function AdminQuizzesPage() {
                       ) : (
                         <Eye size={16} />
                       )}
+
                       {quiz.published ? "Unpublish" : "Publish"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => void deleteQuiz(quiz)}
+                      disabled={busy}
+                      className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+                    >
+                      <Trash2 size={16} />
+                      Delete
                     </button>
                   </div>
                 </article>
