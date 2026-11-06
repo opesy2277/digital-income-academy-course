@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
 type RouteContext = {
-  params: Promise<{ quizId: string }>;
+  params: Promise<{ quizid: string }>;
 };
 
 const UUID_REGEX =
@@ -25,13 +25,13 @@ export async function GET(
       .pop();
 
     const quizId =
-      routeParams?.quizId && routeParams.quizId !== "undefined"
-        ? routeParams.quizId
+      routeParams?.quizid && routeParams.quizid !== "undefined"
+        ? routeParams.quizid
         : urlQuizId;
 
     if (!quizId || !UUID_REGEX.test(quizId)) {
       console.error("INVALID QUIZ ID:", {
-        routeQuizId: routeParams?.quizId,
+        routeQuizId: routeParams?.quizid,
         urlQuizId,
       });
 
